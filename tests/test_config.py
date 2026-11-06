@@ -73,6 +73,36 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "TELEGRAM_SOURCE_CHANNELS or TELEGRAM_HOUSE_CHATS"):
             self.user_source()
 
+    def test_group_digest_is_optional_with_compatible_defaults(self):
+        cfg = self.load()
+        self.assertEqual(cfg.telegram_group_digest_chat, "")
+        self.assertEqual(cfg.telegram_group_digest_time, "21:00")
+
+    def test_group_only_source_accepts_groq_key(self):
+        cfg = self.user_source(
+            TELEGRAM_GROUP_DIGEST_CHAT=" @vakifbank_tr ",
+            TELEGRAM_GROUP_DIGEST_TIME="21:00",
+            GROQ_API_KEY="test-key",
+        )
+        self.assertEqual(cfg.telegram_group_digest_chat, "@vakifbank_tr")
+        self.assertEqual(cfg.telegram_group_digest_time, "21:00")
+        self.assertEqual(cfg.telegram_source_channels, [])
+        self.assertEqual(cfg.telegram_house_chats, [])
+        self.assertEqual(cfg.llm_api_key, "test-key")
+
+    def test_enabled_group_requires_llm_key_without_house_chats(self):
+        with self.assertRaisesRegex(RuntimeError, "group digest: LLM_API_KEY"):
+            self.user_source(TELEGRAM_GROUP_DIGEST_CHAT="@vakifbank_tr")
+
+    def test_group_time_rejects_invalid_clock_values(self):
+        for value in ("9:00", "24:00", "21:60", "-1:30", "21:00:00", "", "tomorrow"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "TELEGRAM_GROUP_DIGEST_TIME"):
+                    self.load(TELEGRAM_GROUP_DIGEST_TIME=value)
+        for value in ("00:00", "23:59"):
+            with self.subTest(value=value):
+                self.assertEqual(self.load(TELEGRAM_GROUP_DIGEST_TIME=value).telegram_group_digest_time, value)
+
 
 if __name__ == "__main__":
     unittest.main()

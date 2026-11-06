@@ -17,3 +17,17 @@ def add_jobs_digest_job(scheduler: AsyncIOScheduler, job_func):
         replace_existing=True,
     )
     logger.info("Scheduled SPB jobs digest at 10:00 UTC daily (13:00 Europe/Moscow)")
+
+
+def add_group_digest_job(scheduler: AsyncIOScheduler, job_func, delivery_time: str = "21:00"):
+    hour, minute = (int(part) for part in delivery_time.split(":"))
+    scheduler.add_job(
+        job_func,
+        trigger=CronTrigger(hour=hour, minute=minute, timezone="Europe/Moscow"),
+        id="group_digest_daily",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    logger.info("Scheduled group digest daily at %s Europe/Moscow", delivery_time)

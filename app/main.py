@@ -5,9 +5,9 @@ import re
 
 from config import load_config, Config
 from db import init_db, get_paused
-from telegram_bot import build_app, send_to_owner, register_bot_commands
+from telegram_bot import build_app, send_to_owner, register_bot_commands, deliver_group_digest
 from telegram_jobs import format_channel_stats, run_spb_jobs_digest
-from scheduler import make_scheduler, add_jobs_digest_job
+from scheduler import make_scheduler, add_jobs_digest_job, add_group_digest_job
 
 
 class RedactTelegramBotTokenFilter(logging.Filter):
@@ -82,6 +82,19 @@ async def main_async():
 
     if cfg.telegram_user_enabled and cfg.telegram_source_channels:
         add_jobs_digest_job(scheduler, scheduled_spb_jobs_job)
+
+    async def scheduled_group_digest_job():
+        try:
+            await deliver_group_digest(app, cfg)
+        except Exception:
+            logging.getLogger(__name__).exception("Scheduled group digest failed")
+            await send_to_owner(
+                app, cfg,
+                "Не удалось подготовить или отправить сводку группы. Повторим при следующем запуске.",
+            )
+
+    if cfg.telegram_user_enabled and cfg.telegram_group_digest_chat:
+        add_group_digest_job(scheduler, scheduled_group_digest_job, cfg.telegram_group_digest_time)
 
     scheduler.start()
 

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from telegram import (
     BotCommand,
@@ -9,6 +10,7 @@ from telegram import (
 from telegram.ext import Application, CommandHandler, ContextTypes
 from config import Config
 from db import get_paused, set_paused
+from group_digest import run_group_digest
 from telegram_jobs import (
     format_channel_stats,
     format_house_chat_stats,
@@ -82,6 +84,13 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Расписание вакансий: ежедневно в 10:00 UTC (13:00 МСК)\n"
         if jobs_configured else ""
     )
+    group_chat = getattr(cfg, "telegram_group_digest_chat", "")
+    if not group_chat:
+        group_status = "не настроена"
+    elif not cfg.telegram_user_enabled:
+        group_status = f"{group_chat}; источник Telegram отключён"
+    else:
+        group_status = f"{group_chat}; ежедневно в {getattr(cfg, 'telegram_group_digest_time', '21:00')} МСК"
     msg = (
         f"Статус:\n"
         f"- Автосбор вакансий: {jobs_status}\n"
@@ -90,7 +99,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{jobs_schedule}"
         f"- Домовых чатов: {len(cfg.telegram_house_chats)}\n"
         f"- Домовые чаты: по команде /house_chats_now\n"
-        f"- Модель для сводок домовых чатов: {cfg.llm_model}"
+        f"- Модель для сводок: {cfg.llm_model}\n"
+        f"- Сводка группы: {group_status}"
     )
     await update.message.reply_text(msg, disable_web_page_preview=True)
 
@@ -180,10 +190,42 @@ async def send_to_owner(app: Application, cfg: Config, text: str, parse_mode: st
         )
 
 
+async def deliver_group_digest(app: Application, cfg: Config) -> int:
+    """Serialize preparation, complete delivery and checkpointing for all callers."""
+    lock = app.bot_data.setdefault("group_digest_lock", asyncio.Lock())
+    async with lock:
+        text, message_count, commit = await run_group_digest(cfg)
+        await send_to_owner(app, cfg, text)
+        commit()
+        return message_count
+
+
+async def cmd_group_digest_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cfg: Config = context.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    if not cfg.telegram_user_enabled or not getattr(cfg, "telegram_group_digest_chat", ""):
+        await update.message.reply_text("Сводка группы не настроена или источник Telegram отключён.")
+        return
+    await update.message.reply_text("Собираю сводку обсуждений группы…", disable_web_page_preview=True)
+    try:
+        count = await deliver_group_digest(context.application, cfg)
+        await update.message.reply_text(
+            f"Готово. Сообщений группы: {count}.", disable_web_page_preview=True,
+        )
+    except Exception:
+        logger.exception("group_digest_now failed")
+        await update.message.reply_text(
+            "Не удалось подготовить или отправить сводку группы. Попробуйте ещё раз позже.",
+            disable_web_page_preview=True,
+        )
+
+
 # Ordered by how often they are used — this is the order of the "Menu" list.
 BOT_COMMANDS = [
     BotCommand("jobs_spb_now", "💼 Вакансии СПб из каналов"),
     BotCommand("house_chats_now", "🏠 Сводка домовых чатов"),
+    BotCommand("group_digest_now", "💬 Сводка обсуждений группы"),
     BotCommand("status", "ℹ️ Статус и расписание"),
     BotCommand("pause", "⏸ Пауза автосбора вакансий"),
     BotCommand("resume", "▶️ Возобновить автосбор вакансий"),
@@ -196,7 +238,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
     if not _is_allowed(update, cfg):
         return
-    lines = ["Бот вакансий и домовых чатов. Команды также доступны через кнопку «Меню»:", ""]
+    lines = ["Бот вакансий и домовых чатов, ежедневных сводок группы. Команды также доступны через кнопку «Меню»:", ""]
     lines += [f"/{c.command} — {c.description}" for c in BOT_COMMANDS]
     await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
@@ -213,6 +255,7 @@ async def register_bot_commands(app: Application, cfg: Config) -> None:
 def build_app(cfg: Config) -> Application:
     application = Application.builder().token(cfg.telegram_bot_token).build()
     application.bot_data["cfg"] = cfg
+    application.bot_data["group_digest_lock"] = asyncio.Lock()
 
     application.add_handler(CommandHandler(["start", "help"], cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
@@ -220,5 +263,6 @@ def build_app(cfg: Config) -> Application:
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("jobs_spb_now", cmd_jobs_spb_now))
     application.add_handler(CommandHandler("house_chats_now", cmd_house_chats_now))
+    application.add_handler(CommandHandler("group_digest_now", cmd_group_digest_now))
 
     return application

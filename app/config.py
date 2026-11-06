@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+import re
 
 
 def _get_env(name: str, default: str | None = None, required: bool = False) -> str:
@@ -39,6 +40,8 @@ class Config:
     summary_max_output_tokens: int
 
     log_level: str
+    telegram_group_digest_chat: str = ""
+    telegram_group_digest_time: str = "21:00"
 
 
 def load_config() -> Config:
@@ -63,6 +66,10 @@ def load_config() -> Config:
     telegram_vacancy_banned_words = tuple(x.strip() for x in banned_words_raw.split(",") if x.strip())
     house_chats_raw = _get_env("TELEGRAM_HOUSE_CHATS", "")
     telegram_house_chats: list[tuple[str, str]] = []
+    group_digest_chat = _get_env("TELEGRAM_GROUP_DIGEST_CHAT", "").strip()
+    group_digest_time = _get_env("TELEGRAM_GROUP_DIGEST_TIME", "21:00").strip()
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", group_digest_time):
+        raise RuntimeError("Invalid TELEGRAM_GROUP_DIGEST_TIME; use HH:MM in Moscow time")
     for item in house_chats_raw.split(";"):
         part = item.strip()
         if not part:
@@ -87,13 +94,17 @@ def load_config() -> Config:
             raise RuntimeError("Missing required env var: TELEGRAM_USER_API_HASH when TELEGRAM_USER_ENABLED=1")
         if not telegram_user_session:
             raise RuntimeError("Missing required env var: TELEGRAM_USER_SESSION when TELEGRAM_USER_ENABLED=1")
-        if not telegram_source_channels and not telegram_house_chats:
+        if not telegram_source_channels and not telegram_house_chats and not group_digest_chat:
             raise RuntimeError(
-                "Configure TELEGRAM_SOURCE_CHANNELS or TELEGRAM_HOUSE_CHATS when TELEGRAM_USER_ENABLED=1"
+                "Configure TELEGRAM_SOURCE_CHANNELS or TELEGRAM_HOUSE_CHATS or TELEGRAM_GROUP_DIGEST_CHAT when TELEGRAM_USER_ENABLED=1"
             )
         if telegram_house_chats and not llm_api_key:
             raise RuntimeError(
                 "Missing required env var for house chats: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)"
+            )
+        if group_digest_chat and not llm_api_key:
+            raise RuntimeError(
+                "Missing required env var for group digest: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)"
             )
 
     return Config(
@@ -118,4 +129,6 @@ def load_config() -> Config:
         summary_max_output_tokens=int(_get_env("SUMMARY_MAX_OUTPUT_TOKENS", "220")),
 
         log_level=_get_env("LOG_LEVEL", "INFO"),
+        telegram_group_digest_chat=group_digest_chat,
+        telegram_group_digest_time=group_digest_time,
     )

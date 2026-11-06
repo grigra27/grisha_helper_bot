@@ -19,6 +19,8 @@ def make_config():
         telegram_source_channels=["@jobs_one", "@jobs_two"],
         telegram_house_chats=[("Дом 1", "@house_one"), ("Дом 2", "@house_two")],
         llm_model="test-house-model",
+        telegram_group_digest_chat="@vakifbank_tr",
+        telegram_group_digest_time="21:00",
     )
 
 
@@ -38,7 +40,7 @@ class TelegramBotCommandTests(unittest.TestCase):
             for handler in group
             for command in handler.commands
         }
-        expected = {"jobs_spb_now", "house_chats_now", "status", "pause", "resume", "help", "start"}
+        expected = {"jobs_spb_now", "house_chats_now", "group_digest_now", "status", "pause", "resume", "help", "start"}
         self.assertEqual(commands, expected)
         self.assertEqual({command.command for command in telegram_bot.BOT_COMMANDS}, expected)
 
@@ -56,6 +58,7 @@ class TelegramBotOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Домовых чатов: 2", text)
         self.assertIn("/house_chats_now", text)
         self.assertIn("test-house-model", text)
+        self.assertIn("@vakifbank_tr; ежедневно в 21:00 МСК", text)
         self.assertNotIn("last_uid", text)
         self.assertNotIn("folder", text)
         self.assertNotIn("1.2", text)
@@ -118,6 +121,7 @@ class TelegramBotOwnerTests(unittest.IsolatedAsyncioTestCase):
             telegram_bot.cmd_help,
             telegram_bot.cmd_jobs_spb_now,
             telegram_bot.cmd_house_chats_now,
+            telegram_bot.cmd_group_digest_now,
         )
         with (
             patch.object(telegram_bot, "get_paused") as get_paused,
@@ -221,6 +225,69 @@ class TelegramBotOwnerTests(unittest.IsolatedAsyncioTestCase):
         commit.assert_not_called()
         self.assertIn("Ошибка при сборе", update.message.reply_text.await_args.args[0])
 
+    async def test_group_manual_delivery_commits_after_all_chunks(self):
+        cfg = make_config()
+        events = []
+        app = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+
+        async def send(**kwargs):
+            events.append(kwargs["text"])
+
+        app.bot.send_message.side_effect = send
+        commit = Mock(side_effect=lambda: events.append("COMMIT"))
+        update = make_update()
+        context = SimpleNamespace(bot_data={"cfg": cfg}, application=app)
+        with patch.object(telegram_bot, "run_group_digest", new_callable=AsyncMock, return_value=("A" * 3000 + "\n" + "B" * 3000, 321, commit)):
+            await telegram_bot.cmd_group_digest_now(update, context)
+        self.assertEqual(events, ["A" * 3000, "B" * 3000, "COMMIT"])
+        commit.assert_called_once_with()
+        self.assertIn("321", update.message.reply_text.await_args.args[0])
+
+    async def test_group_failed_delivery_keeps_checkpoint_and_error_is_safe(self):
+        cfg = make_config()
+        app = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock(side_effect=[None, RuntimeError("private-api-key-marker")])) )
+        commit = Mock()
+        update = make_update()
+        context = SimpleNamespace(bot_data={"cfg": cfg}, application=app)
+        with patch.object(telegram_bot, "run_group_digest", new_callable=AsyncMock, return_value=("A" * 3000 + "\n" + "B" * 3000, 321, commit)):
+            with self.assertLogs(telegram_bot.logger, level="ERROR"):
+                await telegram_bot.cmd_group_digest_now(update, context)
+        commit.assert_not_called()
+        message = update.message.reply_text.await_args.args[0]
+        self.assertIn("Не удалось", message)
+        self.assertNotIn("private-api-key-marker", message)
+
+    async def test_group_lock_serializes_prepare_delivery_and_commit(self):
+        cfg = make_config()
+        app = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+        prepared = []
+        sending = asyncio.Event()
+        release = asyncio.Event()
+        events = []
+
+        async def prepare(cfg):
+            prepared.append(len(prepared) + 1)
+            index = prepared[-1]
+            return str(index), index, lambda: events.append(f"commit{index}")
+
+        async def send(**kwargs):
+            events.append(f"send{kwargs['text']}")
+            if kwargs["text"] == "1":
+                sending.set()
+                await release.wait()
+
+        app.bot.send_message.side_effect = send
+        with patch.object(telegram_bot, "run_group_digest", side_effect=prepare):
+            first = asyncio.create_task(telegram_bot.deliver_group_digest(app, cfg))
+            await sending.wait()
+            second = asyncio.create_task(telegram_bot.deliver_group_digest(app, cfg))
+            await asyncio.sleep(0)
+            self.assertEqual(prepared, [1])
+            release.set()
+            self.assertEqual(await asyncio.gather(first, second), [1, 2])
+        self.assertEqual(events, ["send1", "commit1", "send2", "commit2"])
+
 
 if __name__ == "__main__":
     unittest.main()
+import asyncio
