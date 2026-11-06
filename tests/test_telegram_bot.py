@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "app"))
 
@@ -159,7 +159,7 @@ class TelegramBotOwnerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(telegram_bot, "get_paused", return_value=True),
             patch.object(
                 telegram_bot, "run_spb_jobs_digest", new_callable=AsyncMock,
-                return_value=("Вакансии", 2, []),
+                return_value=("Вакансии", 2, [], lambda: None),
             ) as jobs,
             patch.object(
                 telegram_bot, "run_house_chats_digest", new_callable=AsyncMock,
@@ -188,6 +188,38 @@ class TelegramBotOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[0], telegram_bot.BOT_COMMANDS)
         self.assertIsInstance(call.kwargs["scope"], BotCommandScopeChat)
         self.assertEqual(call.kwargs["scope"].chat_id, cfg.telegram_chat_id)
+
+    async def test_vacancy_cursor_is_committed_after_all_chunks_before_acknowledgement(self):
+        events = []
+        update = make_update()
+        text = "A" * 3000 + "\n" + "B" * 3000
+
+        async def reply(message, **kwargs):
+            events.append(message)
+
+        update.message.reply_text.side_effect = reply
+        commit = Mock(side_effect=lambda: events.append("COMMIT"))
+        with patch.object(
+            telegram_bot, "run_spb_jobs_digest", new_callable=AsyncMock,
+            return_value=(text, 2, [], commit),
+        ):
+            await telegram_bot.cmd_jobs_spb_now(update, SimpleNamespace(bot_data={"cfg": make_config()}))
+        self.assertEqual(events[1:4], ["A" * 3000, "B" * 3000, "COMMIT"])
+        self.assertIn("Готово", events[4])
+        commit.assert_called_once_with()
+
+    async def test_failed_second_vacancy_chunk_does_not_commit_cursor(self):
+        update = make_update()
+        update.message.reply_text.side_effect = [None, None, RuntimeError("Telegram send failed"), None]
+        commit = Mock()
+        with patch.object(
+            telegram_bot, "run_spb_jobs_digest", new_callable=AsyncMock,
+            return_value=("A" * 3000 + "\n" + "B" * 3000, 2, [], commit),
+        ):
+            with self.assertLogs(telegram_bot.logger, level="ERROR"):
+                await telegram_bot.cmd_jobs_spb_now(update, SimpleNamespace(bot_data={"cfg": make_config()}))
+        commit.assert_not_called()
+        self.assertIn("Ошибка при сборе", update.message.reply_text.await_args.args[0])
 
 
 if __name__ == "__main__":

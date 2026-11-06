@@ -68,8 +68,9 @@ async def main_async():
             logging.getLogger(__name__).info("Paused; skipping scheduled SPB jobs digest.")
             return
         try:
-            text, matched_posts, channel_stats = await run_spb_jobs_digest(cfg)
+            text, matched_posts, channel_stats, commit = await run_spb_jobs_digest(cfg)
             await send_to_owner(app, cfg, text)
+            commit()
             await send_to_owner(
                 app,
                 cfg,

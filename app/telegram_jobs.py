@@ -1,11 +1,22 @@
+import asyncio
 import logging
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable
+
+import httpx
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from city_extract import extract_inline_hh_links_from_entities, parse_remote_vacancies, parse_spb_vacancies
+from city_extract import (
+    VacancyItem,
+    _is_banned_title,
+    extract_inline_hh_links_from_entities,
+    parse_remote_vacancies,
+    parse_spb_vacancies,
+)
 from config import Config
 from db import (
     get_tg_house_last_id,
@@ -14,6 +25,7 @@ from db import (
     set_tg_source_last_id,
 )
 from llm import make_client, summarize_house_chat_messages
+from perforum_jobs import extract_perforum_links, fetch_perforum_job
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +112,9 @@ def _cap_messages_blob(rendered_messages: list[str], max_chars: int) -> str:
     return "\n".join(kept)
 
 
-async def run_spb_jobs_digest(cfg: Config) -> tuple[str, int, list[ChannelRunStats]]:
+async def run_spb_jobs_digest(cfg: Config) -> tuple[str, int, list[ChannelRunStats], Callable[[], None]]:
     if not cfg.telegram_user_enabled:
-        return "Источник Telegram-каналов отключён (TELEGRAM_USER_ENABLED=0).", 0, []
+        return "Источник Telegram-каналов отключён (TELEGRAM_USER_ENABLED=0).", 0, [], lambda: None
 
     client = TelegramClient(StringSession(cfg.telegram_user_session), cfg.telegram_user_api_id, cfg.telegram_user_api_hash)
     fetch_limit = _effective_source_fetch_limit(cfg.telegram_source_fetch_limit)
@@ -111,8 +123,17 @@ async def run_spb_jobs_digest(cfg: Config) -> tuple[str, int, list[ChannelRunSta
     remote_lines: list[str] = []
     matched_posts = 0
     channel_stats: list[ChannelRunStats] = []
+    cursors: dict[str, int] = {}
+    page_cache: dict[str, object] = {}
+    seen_perforum: set[str] = set()
+    http_client = None
+    page_slots = asyncio.Semaphore(3)
 
-    async with client:
+    async def load_page(url):
+        async with page_slots:
+            return await fetch_perforum_job(http_client, url)
+
+    async with client, AsyncExitStack() as stack:
         if not await client.is_user_authorized():
             raise RuntimeError("Telegram user session is not authorized. Recreate TELEGRAM_USER_SESSION.")
 
@@ -122,14 +143,35 @@ async def run_spb_jobs_digest(cfg: Config) -> tuple[str, int, list[ChannelRunSta
             channel_title = getattr(entity, "title", None) or channel_ref
             last_id = get_tg_source_last_id(channel_id)
 
-            msgs = await client.get_messages(entity, limit=fetch_limit, min_id=last_id)
+            msgs = await client.get_messages(
+                entity, limit=fetch_limit, min_id=last_id, reverse=bool(last_id)
+            )
+            msgs = sorted((msg for msg in msgs if msg and getattr(msg, "id", None)), key=lambda msg: msg.id)
+            links_by_post = {
+                msg.id: extract_perforum_links(msg.message or "", getattr(msg, "entities", None))
+                for msg in msgs
+            }
+            new_links = list(dict.fromkeys(
+                url for links in links_by_post.values() for url in links if url not in page_cache
+            ))
+            if new_links:
+                if http_client is None:
+                    http_client = await stack.enter_async_context(httpx.AsyncClient(
+                        timeout=15,
+                        limits=httpx.Limits(max_connections=3, max_keepalive_connections=3),
+                    ))
+                fetched = await asyncio.gather(*(load_page(url) for url in new_links), return_exceptions=True)
+                for url, job in zip(new_links, fetched):
+                    if isinstance(job, BaseException):
+                        raise job
+                    page_cache[url] = job
 
             max_seen = last_id
             new_hits = 0
             detected_vacancies = 0
             selected_vacancies = 0
 
-            for msg in reversed(msgs):
+            for msg in msgs:
                 if not msg or not getattr(msg, "id", None):
                     continue
                 if msg.id > max_seen:
@@ -139,22 +181,37 @@ async def run_spb_jobs_digest(cfg: Config) -> tuple[str, int, list[ChannelRunSta
                 if not text:
                     continue
 
-                inline_title_links = extract_inline_hh_links_from_entities(text, getattr(msg, "entities", None))
-                parse_result = parse_spb_vacancies(
-                    text,
-                    banned_keywords=cfg.telegram_vacancy_banned_words,
-                    inline_title_links=inline_title_links,
-                )
-                remote_result = parse_remote_vacancies(
-                    text,
-                    banned_keywords=cfg.telegram_vacancy_banned_words,
-                    inline_title_links=inline_title_links,
-                )
-                detected_vacancies += parse_result.detected_items
-                detected_vacancies += remote_result.detected_items
-
-                spb_vacancies = parse_result.selected_items
-                remote_vacancies = remote_result.selected_items
+                if links_by_post[msg.id]:
+                    spb_vacancies, remote_vacancies = [], []
+                    for url in links_by_post[msg.id]:
+                        if url in seen_perforum:
+                            continue
+                        seen_perforum.add(url)
+                        detected_vacancies += 1
+                        job = page_cache[url]
+                        if job is None or _is_banned_title(job.title, cfg.telegram_vacancy_banned_words):
+                            continue
+                        item = VacancyItem(job.title, job.link, job.company)
+                        if job.is_remote:
+                            remote_vacancies.append(item)
+                        elif job.is_spb:
+                            spb_vacancies.append(item)
+                else:
+                    inline_title_links = extract_inline_hh_links_from_entities(text, getattr(msg, "entities", None))
+                    parse_result = parse_spb_vacancies(
+                        text,
+                        banned_keywords=cfg.telegram_vacancy_banned_words,
+                        inline_title_links=inline_title_links,
+                    )
+                    remote_result = parse_remote_vacancies(
+                        text,
+                        banned_keywords=cfg.telegram_vacancy_banned_words,
+                        inline_title_links=inline_title_links,
+                    )
+                    detected_vacancies += parse_result.detected_items
+                    detected_vacancies += remote_result.detected_items
+                    spb_vacancies = parse_result.selected_items
+                    remote_vacancies = remote_result.selected_items
                 if not spb_vacancies and not remote_vacancies:
                     continue
 
@@ -180,7 +237,7 @@ async def run_spb_jobs_digest(cfg: Config) -> tuple[str, int, list[ChannelRunSta
                         remote_lines.append(f"{idx}. {item.title}")
                         remote_lines.append(f"   {item.link}")
 
-            set_tg_source_last_id(channel_id, max_seen)
+            cursors[channel_id] = max_seen
             channel_stats.append(
                 ChannelRunStats(
                     channel_ref=channel_ref,
@@ -202,14 +259,23 @@ async def run_spb_jobs_digest(cfg: Config) -> tuple[str, int, list[ChannelRunSta
 
     stats_block = format_channel_stats(channel_stats)
 
+    committed = False
+
+    def commit():
+        nonlocal committed
+        if not committed:
+            for channel_id, message_id in cursors.items():
+                set_tg_source_last_id(channel_id, max(message_id, get_tg_source_last_id(channel_id)))
+            committed = True
+
     if matched_posts == 0:
-        return f"В новых постах по выбранным каналам вакансий СПб не найдено.\n\n{stats_block}", 0, channel_stats
+        return f"В новых постах по выбранным каналам вакансий СПб и удалённой работы не найдено.\n\n{stats_block}", 0, channel_stats, commit
 
     if remote_lines:
         lines.append("\nудаленная работа:")
         lines.extend(remote_lines)
 
-    return "\n".join(lines), matched_posts, channel_stats
+    return "\n".join(lines), matched_posts, channel_stats, commit
 
 
 async def run_house_chats_digest(cfg: Config) -> tuple[str, int, list[HouseChatRunStats]]:
