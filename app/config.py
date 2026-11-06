@@ -16,12 +16,6 @@ def _get_bool(name: str, default: bool = False) -> bool:
 
 @dataclass(frozen=True)
 class Config:
-    imap_host: str
-    imap_port: int
-    imap_user: str
-    imap_password: str
-    imap_folder: str
-
     telegram_bot_token: str
     telegram_chat_id: int
 
@@ -42,20 +36,12 @@ class Config:
     llm_model: str
 
     tz: str
-    schedule_hours: list[int]
-
-    max_emails_per_run: int
-    max_chars_per_email: int
     summary_max_output_tokens: int
-    digest_max_output_tokens: int
 
     log_level: str
 
 
 def load_config() -> Config:
-    hours_raw = _get_env("SCHEDULE_HOURS", "10,12,14,16,18")
-    schedule_hours = [int(x.strip()) for x in hours_raw.split(",") if x.strip()]
-
     # Backward-compatible fallbacks:
     # - If you still have OPENAI_API_KEY/OPENAI_MODEL in .env, it will work.
     llm_api_key = (
@@ -64,9 +50,6 @@ def load_config() -> Config:
         or os.getenv("OPENAI_API_KEY")
         or ""
     )
-    if not llm_api_key:
-        raise RuntimeError("Missing required env var: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)")
-
     llm_base_url = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.groq.com/openai/v1"
     llm_model = os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "llama-3.3-70b-versatile"
 
@@ -104,16 +87,16 @@ def load_config() -> Config:
             raise RuntimeError("Missing required env var: TELEGRAM_USER_API_HASH when TELEGRAM_USER_ENABLED=1")
         if not telegram_user_session:
             raise RuntimeError("Missing required env var: TELEGRAM_USER_SESSION when TELEGRAM_USER_ENABLED=1")
-        if not telegram_source_channels:
-            raise RuntimeError("Missing required env var: TELEGRAM_SOURCE_CHANNELS when TELEGRAM_USER_ENABLED=1")
+        if not telegram_source_channels and not telegram_house_chats:
+            raise RuntimeError(
+                "Configure TELEGRAM_SOURCE_CHANNELS or TELEGRAM_HOUSE_CHATS when TELEGRAM_USER_ENABLED=1"
+            )
+        if telegram_house_chats and not llm_api_key:
+            raise RuntimeError(
+                "Missing required env var for house chats: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)"
+            )
 
     return Config(
-        imap_host=_get_env("IMAP_HOST", required=True),
-        imap_port=int(_get_env("IMAP_PORT", "993")),
-        imap_user=_get_env("IMAP_USER", required=True),
-        imap_password=_get_env("IMAP_PASSWORD", required=True),
-        imap_folder=_get_env("IMAP_FOLDER", "INBOX/ONLINE"),
-
         telegram_bot_token=_get_env("TELEGRAM_BOT_TOKEN", required=True),
         telegram_chat_id=int(_get_env("TELEGRAM_CHAT_ID", required=True)),
 
@@ -132,12 +115,7 @@ def load_config() -> Config:
         llm_model=llm_model,
 
         tz=_get_env("TZ", "Europe/Moscow"),
-        schedule_hours=schedule_hours,
-
-        max_emails_per_run=int(_get_env("MAX_EMAILS_PER_RUN", "80")),
-        max_chars_per_email=int(_get_env("MAX_CHARS_PER_EMAIL", "3000")),
         summary_max_output_tokens=int(_get_env("SUMMARY_MAX_OUTPUT_TOKENS", "220")),
-        digest_max_output_tokens=int(_get_env("DIGEST_MAX_OUTPUT_TOKENS", "900")),
 
         log_level=_get_env("LOG_LEVEL", "INFO"),
     )

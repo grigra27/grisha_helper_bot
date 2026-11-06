@@ -1,9 +1,4 @@
-import csv
-import io
-import json
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from telegram import (
     BotCommand,
     BotCommandScopeAllPrivateChats,
@@ -13,8 +8,7 @@ from telegram import (
 )
 from telegram.ext import Application, CommandHandler, ContextTypes
 from config import Config
-from db import get_paused, set_paused, get_last_uid, get_stats_history
-from digest import run_digest
+from db import get_paused, set_paused
 from telegram_jobs import (
     format_channel_stats,
     format_house_chat_stats,
@@ -77,15 +71,26 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update, cfg):
         return
     paused = get_paused()
-    last_uid = get_last_uid()
+    jobs_configured = cfg.telegram_user_enabled and bool(cfg.telegram_source_channels)
+    if not cfg.telegram_user_enabled:
+        jobs_status = "недоступен: источник Telegram отключён"
+    elif not cfg.telegram_source_channels:
+        jobs_status = "не настроен: нет каналов вакансий"
+    else:
+        jobs_status = "на паузе" if paused else "включён"
+    jobs_schedule = (
+        "- Расписание вакансий: ежедневно в 10:00 UTC (13:00 МСК)\n"
+        if jobs_configured else ""
+    )
     msg = (
         f"Статус:\n"
-        f"- paused: {paused}\n"
-        f"- last_uid: {last_uid}\n"
-        f"- folder: {cfg.imap_folder}\n"
-        f"- schedule hours: {cfg.schedule_hours}\n"
-        f"- llm: {cfg.llm_model}\n"
-        f"- version: 1.2"
+        f"- Автосбор вакансий: {jobs_status}\n"
+        f"- Источник Telegram: {'включён' if cfg.telegram_user_enabled else 'отключён'}\n"
+        f"- Каналов вакансий: {len(cfg.telegram_source_channels)}\n"
+        f"{jobs_schedule}"
+        f"- Домовых чатов: {len(cfg.telegram_house_chats)}\n"
+        f"- Домовые чаты: по команде /house_chats_now\n"
+        f"- Модель для сводок домовых чатов: {cfg.llm_model}"
     )
     await update.message.reply_text(msg, disable_web_page_preview=True)
 
@@ -96,7 +101,7 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     set_paused(True)
     await update.message.reply_text(
-        "Ок, поставил на паузу. Авто-дайджесты не будут отправляться.",
+        "Автосбор вакансий поставлен на паузу. Ручные команды вакансий и домовых чатов доступны.",
         disable_web_page_preview=True,
     )
 
@@ -106,34 +111,16 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update, cfg):
         return
     set_paused(False)
+    if not cfg.telegram_user_enabled:
+        message = "Пауза снята. Источник Telegram отключён, автосбор вакансий не запланирован."
+    elif not cfg.telegram_source_channels:
+        message = "Пауза снята. Каналы вакансий не настроены, автосбор вакансий не запланирован."
+    else:
+        message = "Автосбор вакансий возобновлён: ежедневно в 10:00 UTC (13:00 МСК)."
     await update.message.reply_text(
-        "Ок, снял с паузы. Авто-дайджесты снова будут отправляться.",
+        message,
         disable_web_page_preview=True,
     )
-
-
-async def cmd_digest_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg: Config = context.bot_data["cfg"]
-    if not _is_allowed(update, cfg):
-        return
-
-    await update.message.reply_text("Делаю дайджест…", disable_web_page_preview=True)
-    try:
-        text, total, failed, commit = run_digest(cfg)
-        for chunk in _split_telegram_message(text):
-            await update.message.reply_text(chunk, parse_mode="HTML", disable_web_page_preview=True)
-        commit()
-
-        await update.message.reply_text(
-            f"Готово. Писем: {total}, не обработано: {failed}.",
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
-        logger.exception("digest_now failed")
-        await update.message.reply_text(
-            f"Ошибка при формировании дайджеста: {e}",
-            disable_web_page_preview=True,
-        )
 
 
 async def cmd_jobs_spb_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,43 +169,6 @@ async def cmd_house_chats_now(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
-async def cmd_stats_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg: Config = context.bot_data["cfg"]
-    if not _is_allowed(update, cfg):
-        return
-
-    history = get_stats_history()
-    if not history:
-        await update.message.reply_text(
-            "Истории статистики пока нет — данные появляются после дайджестов.",
-            disable_web_page_preview=True,
-        )
-        return
-
-    # BOM so Excel opens Cyrillic correctly
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter=";")
-    writer.writerow(["date", "total", "other", "claims_total", "claims_json"])
-    for row in history:
-        claims_total = sum(row["claims"].values())
-        writer.writerow([
-            row["date"],
-            row["total"],
-            row["other"],
-            claims_total,
-            json.dumps(row["claims"], ensure_ascii=False),
-        ])
-
-    payload = ("\ufeff" + buf.getvalue()).encode("utf-8")
-    filename = f"stats_daily_{datetime.now(ZoneInfo(cfg.tz)).strftime('%Y%m%d')}.csv"
-
-    await update.message.reply_document(
-        document=io.BytesIO(payload),
-        filename=filename,
-        caption=f"Ежедневная статистика писем: {len(history)} дн., всего {sum(r['total'] for r in history)}",
-    )
-
-
 async def send_to_owner(app: Application, cfg: Config, text: str, parse_mode: str | None = None) -> None:
     for chunk in _split_telegram_message(text):
         await app.bot.send_message(
@@ -231,14 +181,13 @@ async def send_to_owner(app: Application, cfg: Config, text: str, parse_mode: st
 
 # Ordered by how often they are used — this is the order of the "Menu" list.
 BOT_COMMANDS = [
-    BotCommand("digest_now", "📬 Дайджест почты сейчас"),
-    BotCommand("house_chats_now", "🏠 Сводка домовых чатов"),
     BotCommand("jobs_spb_now", "💼 Вакансии СПб из каналов"),
+    BotCommand("house_chats_now", "🏠 Сводка домовых чатов"),
     BotCommand("status", "ℹ️ Статус и расписание"),
-    BotCommand("stats_csv", "📊 Статистика писем (CSV)"),
-    BotCommand("pause", "⏸ Пауза авто-дайджестов"),
-    BotCommand("resume", "▶️ Снять паузу"),
+    BotCommand("pause", "⏸ Пауза автосбора вакансий"),
+    BotCommand("resume", "▶️ Возобновить автосбор вакансий"),
     BotCommand("help", "❓ Список команд"),
+    BotCommand("start", "▶️ Команды бота"),
 ]
 
 
@@ -246,7 +195,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
     if not _is_allowed(update, cfg):
         return
-    lines = ["Команды (также доступны через кнопку «Меню»):", ""]
+    lines = ["Бот вакансий и домовых чатов. Команды также доступны через кнопку «Меню»:", ""]
     lines += [f"/{c.command} — {c.description}" for c in BOT_COMMANDS]
     await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
@@ -268,9 +217,7 @@ def build_app(cfg: Config) -> Application:
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
-    application.add_handler(CommandHandler("digest_now", cmd_digest_now))
     application.add_handler(CommandHandler("jobs_spb_now", cmd_jobs_spb_now))
     application.add_handler(CommandHandler("house_chats_now", cmd_house_chats_now))
-    application.add_handler(CommandHandler("stats_csv", cmd_stats_csv))
 
     return application

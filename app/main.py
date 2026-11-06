@@ -7,9 +7,7 @@ from config import load_config, Config
 from db import init_db, get_paused
 from telegram_bot import build_app, send_to_owner, register_bot_commands
 from telegram_jobs import format_channel_stats, run_spb_jobs_digest
-from scheduler import make_scheduler, add_digest_jobs
-from digest import run_digest, build_daily_stats_text
-from apscheduler.triggers.cron import CronTrigger
+from scheduler import make_scheduler, add_jobs_digest_job
 
 
 class RedactTelegramBotTokenFilter(logging.Filter):
@@ -65,25 +63,6 @@ async def main_async():
 
     scheduler = make_scheduler(cfg.tz)
 
-    last_digest_hour = max(cfg.schedule_hours) if cfg.schedule_hours else 18
-
-    async def scheduled_digest_job(run_hour: int):
-        if get_paused():
-            logging.getLogger(__name__).info("Paused; skipping scheduled digest.")
-            return
-        try:
-            text, total, failed, commit = run_digest(cfg)
-            await send_to_owner(app, cfg, text, parse_mode="HTML")
-            commit()
-            await send_to_owner(app, cfg, f"Авто-дайджест отправлен. Писем: {total}, не обработано: {failed}.")
-            if run_hour == last_digest_hour:
-                await send_to_owner(app, cfg, build_daily_stats_text(cfg))
-        except Exception as e:
-            logging.getLogger(__name__).exception("Scheduled digest failed")
-            await send_to_owner(app, cfg, f"Ошибка авто-дайджеста: {e}")
-
-    add_digest_jobs(scheduler, cfg.schedule_hours, scheduled_digest_job)
-
     async def scheduled_spb_jobs_job():
         if get_paused():
             logging.getLogger(__name__).info("Paused; skipping scheduled SPB jobs digest.")
@@ -100,13 +79,8 @@ async def main_async():
             logging.getLogger(__name__).exception("Scheduled SPB jobs digest failed")
             await send_to_owner(app, cfg, f"Ошибка авто-сбора вакансий СПб: {e}")
 
-    scheduler.add_job(
-        scheduled_spb_jobs_job,
-        trigger=CronTrigger(hour=10, minute=0, timezone="UTC"),
-        id="jobs_spb_1000_utc",
-        replace_existing=True,
-    )
-    logging.getLogger(__name__).info("Scheduled SPB jobs digest at 10:00 UTC daily")
+    if cfg.telegram_user_enabled and cfg.telegram_source_channels:
+        add_jobs_digest_job(scheduler, scheduled_spb_jobs_job)
 
     scheduler.start()
 
