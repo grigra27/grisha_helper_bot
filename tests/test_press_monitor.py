@@ -184,6 +184,25 @@ class PressMonitorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(db.kv_get(CURSOR))
         self.send.assert_not_awaited()
 
+    async def test_broad_finance_categories_are_not_accepted_for_the_new_profile(self):
+        self.telegram.messages = [linked_post(10, [("Сбор и цены", "https://pressfeed.ru/query/1")])]
+        self.llm.pick = lambda item: True
+        for category in ("finance", "investments"):
+            self.llm.corrupt = lambda rows: [{**row, "category": category} for row in rows]
+            with self.assertRaises(press.PressMonitorError):
+                await press.run_press_monitor(self.cfg, self.send)
+            self.assertIsNone(db.kv_get(CURSOR))
+        self.send.assert_not_awaited()
+
+    async def test_asset_management_and_leasing_can_be_classified_and_rendered(self):
+        self.llm.pick = lambda item: True
+        for category, label in (("asset_management", "Управление активами"), ("leasing", "Лизинг")):
+            self.llm.corrupt = lambda rows: [{**row, "category": category} for row in rows]
+            request = press.PressRequest("test", label, "Вопрос эксперту: " + label, "https://pressfeed.ru/query/1")
+            decisions = await press.classify_requests(self.llm, "test-model", [request])
+            self.assertEqual(decisions[0]["category"], category)
+            self.assertIn("Запрос СМИ · " + label, press.format_alert(request, decisions[0], "https://t.me/Pressfeed_queries/1"))
+
     async def test_long_text_is_fully_classified_without_truncating_the_suffix(self):
         text = "Подробный вопрос " * 1000 + "КОНЕЦ_ОСАГО"
         self.telegram.messages = [message(10, text)]

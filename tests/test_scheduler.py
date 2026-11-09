@@ -1,7 +1,7 @@
 import asyncio
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from types import SimpleNamespace
@@ -56,6 +56,17 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(entry.coalesce)
         upcoming = entry.trigger.get_next_fire_time(None, datetime(2026, 11, 9, 10, 2, tzinfo=timezone.utc))
         self.assertEqual(upcoming.astimezone(ZoneInfo("Europe/Moscow")).strftime("%H:%M"), "13:15")
+
+    def test_press_polling_defaults_to_once_an_hour(self):
+        async def job():
+            pass
+        scheduler = make_scheduler("UTC")
+        add_press_monitor_job(scheduler, job)
+        entry = scheduler.get_job("press_monitor")
+        upcoming = entry.trigger.get_next_fire_time(None, datetime(2026, 11, 9, 10, 2, tzinfo=timezone.utc))
+        following = entry.trigger.get_next_fire_time(upcoming, upcoming)
+        self.assertEqual(upcoming.astimezone(ZoneInfo("Europe/Moscow")).strftime("%H:%M"), "14:00")
+        self.assertEqual(following - upcoming, timedelta(hours=1))
 
 
 class MainGroupSchedulingTests(unittest.IsolatedAsyncioTestCase):
@@ -183,7 +194,7 @@ class MainPressSchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def test_press_checks_respect_window_and_do_not_send_zero_results(self):
         cfg = SimpleNamespace(log_level="INFO", tz="Europe/Moscow", telegram_user_enabled=True,
             telegram_source_channels=[], telegram_group_digest_chat="", telegram_group_digest_time="21:00",
-            telegram_press_channel="@Pressfeed_queries", telegram_press_poll_minutes=15)
+            telegram_press_channel="@Pressfeed_queries", telegram_press_poll_minutes=60)
         app = SimpleNamespace(initialize=AsyncMock(), start=AsyncMock(), stop=AsyncMock(), shutdown=AsyncMock(),
             updater=SimpleNamespace(start_polling=AsyncMock(), stop=AsyncMock()))
         with (
@@ -200,7 +211,7 @@ class MainPressSchedulingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await main.main_async()
             scheduled.assert_called_once()
-            self.assertEqual(scheduled.call_args.args[2], 15)
+            self.assertEqual(scheduled.call_args.args[2], 60)
             job = scheduled.call_args.args[1]
             await job()
             deliver.assert_not_awaited()

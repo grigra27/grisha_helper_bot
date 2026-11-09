@@ -12,7 +12,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from config import Config, group_digest_sources
 from db import get_paused, set_paused
 from group_digest import run_group_digest
-from press_monitor import PressRunStats, run_press_monitor
+from press_monitor import CATEGORIES, PressRunStats, run_press_monitor
 from telegram_jobs import (
     format_channel_stats,
     format_house_chat_stats,
@@ -98,7 +98,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if press_channel:
         if cfg.telegram_user_enabled:
             press_status = (
-                f"{press_channel}; каждые {getattr(cfg, 'telegram_press_poll_minutes', 15)} мин., "
+                f"{press_channel}; каждые {getattr(cfg, 'telegram_press_poll_minutes', 60)} мин., "
                 f"{getattr(cfg, 'telegram_press_active_hours', '09:00-21:00')} МСК"
             )
         else:
@@ -115,6 +115,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"- Сводки групп: {group_status}\n"
         f"- Запросы СМИ: {press_status}"
     )
+    if press_channel:
+        msg += "\n- Темы СМИ: " + ", ".join(CATEGORIES.values())
     await update.message.reply_text(msg, disable_web_page_preview=True)
 
 
@@ -275,7 +277,7 @@ BOT_COMMANDS = [
     BotCommand("jobs_spb_now", "💼 Вакансии СПб из каналов"),
     BotCommand("house_chats_now", "🏠 Сводка домовых чатов"),
     BotCommand("group_digest_now", "💬 Сводки обсуждений групп"),
-    BotCommand("press_now", "📰 Запросы СМИ по финансовой тематике"),
+    BotCommand("press_now", "📰 СМИ: рынок, страхование, активы, лизинг"),
     BotCommand("status", "ℹ️ Статус и расписание"),
     BotCommand("pause", "⏸ Пауза автосбора вакансий"),
     BotCommand("resume", "▶️ Возобновить автосбор вакансий"),

@@ -33,7 +33,7 @@ def add_group_digest_job(scheduler: AsyncIOScheduler, job_func, delivery_time: s
     logger.info("Scheduled group digest daily at %s Europe/Moscow", delivery_time)
 
 
-def add_press_monitor_job(scheduler: AsyncIOScheduler, job_func, poll_minutes: int = 15):
+def add_press_monitor_job(scheduler: AsyncIOScheduler, job_func, poll_minutes: int = 60):
     scheduler.add_job(
         job_func,
         trigger=CronTrigger(minute="0" if poll_minutes == 60 else f"*/{poll_minutes}", timezone="Europe/Moscow"),

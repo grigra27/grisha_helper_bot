@@ -44,7 +44,7 @@ class Config:
     telegram_group_digest_time: str = "21:00"
     telegram_group_digest_chats: tuple[str, ...] = ()
     telegram_press_channel: str = ""
-    telegram_press_poll_minutes: int = 15
+    telegram_press_poll_minutes: int = 60
     telegram_press_active_hours: str = "09:00-21:00"
 
 
@@ -87,7 +87,7 @@ def load_config() -> Config:
         raise RuntimeError("Invalid TELEGRAM_GROUP_DIGEST_TIME; use HH:MM in Moscow time")
     press_channel = _get_env("TELEGRAM_PRESS_CHANNEL", "").strip()
     try:
-        press_minutes = int(_get_env("TELEGRAM_PRESS_POLL_MINUTES", "15"))
+        press_minutes = int(_get_env("TELEGRAM_PRESS_POLL_MINUTES", "60"))
         if press_minutes not in (5, 10, 15, 20, 30, 60):
             raise ValueError
     except ValueError:

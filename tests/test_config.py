@@ -113,7 +113,7 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "press monitor: LLM_API_KEY"):
             self.user_source(TELEGRAM_PRESS_CHANNEL="@Pressfeed_queries")
         cfg = self.user_source(TELEGRAM_PRESS_CHANNEL="@Pressfeed_queries", GROQ_API_KEY="test-key")
-        self.assertEqual(cfg.telegram_press_poll_minutes, 15)
+        self.assertEqual(cfg.telegram_press_poll_minutes, 60)
         self.assertEqual(cfg.telegram_press_active_hours, "09:00-21:00")
         self.assertEqual(group_digest_sources(cfg), ())
         for key, value in [("TELEGRAM_PRESS_POLL_MINUTES", "0"), ("TELEGRAM_PRESS_POLL_MINUTES", "7"), ("TELEGRAM_PRESS_ACTIVE_HOURS", "9-21"), ("TELEGRAM_PRESS_ACTIVE_HOURS", "09:00-24:00")]:
