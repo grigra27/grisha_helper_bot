@@ -4,7 +4,7 @@ import os
 import re
 import time
 
-from config import load_config, Config, group_digest_sources
+from config import load_config, Config, group_digest_sources, press_monitor_sources
 from db import init_db, get_paused
 from telegram_bot import build_app, send_to_owner, register_bot_commands, deliver_group_digest, deliver_press_requests
 from press_monitor import monitoring_window_open
@@ -112,7 +112,7 @@ async def main_async():
                 await send_to_owner(app, cfg, "Не удалось проверить запросы СМИ. Повторим при следующей проверке.")
                 last_press_error = current
 
-    if cfg.telegram_user_enabled and getattr(cfg, "telegram_press_channel", ""):
+    if cfg.telegram_user_enabled and press_monitor_sources(cfg):
         add_press_monitor_job(scheduler, scheduled_press_monitor_job, cfg.telegram_press_poll_minutes)
 
     scheduler.start()

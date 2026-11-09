@@ -15,10 +15,17 @@ from telethon.tl.types import MessageEntityTextUrl
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 import db
 import press_monitor as press
-from test_group_digest import FakeTelegram, message
+from test_group_digest import FakeTelegram, message as base_message
 
 SOURCE_ID = 1110709402
 CURSOR = f"tg_press_last_id:{SOURCE_ID}"
+NOW = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+
+
+def message(identifier, text, *, age=timedelta(), media=None):
+    result = base_message(identifier, text, media=media)
+    result.date = NOW - age
+    return result
 
 
 def linked_post(identifier, queries, *, prefix=""):
@@ -98,7 +105,7 @@ class PressAdapterTests(unittest.TestCase):
         self.assertTrue(press.monitoring_window_open(cfg, datetime(2026, 11, 9, 22, tzinfo=timezone.utc)))
 
 
-class PressMonitorTests(unittest.IsolatedAsyncioTestCase):
+class PressMonitorFixture(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         directory = self.enterContext(tempfile.TemporaryDirectory())
         self.enterContext(patch.object(db, "DB_PATH", Path(directory) / "state.db"))
@@ -112,7 +119,10 @@ class PressMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(press, "TelegramClient", return_value=self.telegram))
         self.enterContext(patch.object(press, "StringSession", return_value=None))
         self.enterContext(patch.object(press, "make_client", return_value=self.llm))
+        self.enterContext(patch.object(press, "_utcnow", return_value=NOW))
 
+
+class PressMonitorTests(PressMonitorFixture):
     async def test_only_matching_query_from_a_mixed_post_is_delivered(self):
         self.telegram.messages = [linked_post(10, [("Виды икры", "https://pressfeed.ru/query/1"), ("Стоимость ОСАГО", "https://pressfeed.ru/query/2")])]
         self.llm.pick = lambda item: "ОСАГО" in item["text"]
@@ -205,16 +215,15 @@ class PressMonitorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_long_text_is_fully_classified_without_truncating_the_suffix(self):
         text = "Подробный вопрос " * 1000 + "КОНЕЦ_ОСАГО"
-        self.telegram.messages = [message(10, text)]
-        await press.run_press_monitor(self.cfg, self.send)
+        await press.classify_requests(self.llm, "test-model", [press.PressRequest("long", "Вопрос", text, "")])
         pieces = [item for batch in self.llm.payloads for item in batch]
         self.assertEqual("".join(item["text"] for item in pieces), text)
         self.assertGreater(len(pieces), 1)
 
     async def test_more_than_150_posts_and_snapshot_arrivals_are_not_lost(self):
         db.kv_set(CURSOR, "1")
-        self.telegram.messages = [message(index, f"Запрос {index}") for index in range(2, 163)]
-        self.telegram.after_snapshot = lambda: self.telegram.messages.append(message(163, "Новый после снимка"))
+        self.telegram.messages = [linked_post(index, [(f"Запрос {index}", f"https://pressfeed.ru/query/{index}")]) for index in range(2, 163)]
+        self.telegram.after_snapshot = lambda: self.telegram.messages.append(linked_post(163, [("Новый после снимка", "https://pressfeed.ru/query/163")]))
         stats = await press.run_press_monitor(self.cfg, self.send)
         self.assertEqual(stats.posts, 161)
         self.assertEqual(db.kv_get(CURSOR), "162")
@@ -225,7 +234,8 @@ class PressMonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_run_excludes_old_archive_and_preserves_other_sources(self):
         db.kv_set("tg_source_last_id:1470416043", "14629")
         db.kv_set("tg_group_last_id:1678058688", "152040")
-        self.telegram.messages = [message(9, "Старый архив", age=timedelta(days=2)), message(10, "Новый запрос")]
+        old = linked_post(9, [("Старый архив", "https://pressfeed.ru/query/9")]);old.date -= timedelta(days=2)
+        self.telegram.messages = [old, linked_post(10, [("Новый запрос", "https://pressfeed.ru/query/10")])]
         stats = await press.run_press_monitor(self.cfg, self.send)
         self.assertEqual(stats.posts, 1)
         self.assertEqual(db.kv_get("tg_source_last_id:1470416043"), "14629")

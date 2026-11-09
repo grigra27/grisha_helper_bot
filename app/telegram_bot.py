@@ -9,7 +9,7 @@ from telegram import (
     Update,
 )
 from telegram.ext import Application, CommandHandler, ContextTypes
-from config import Config, group_digest_sources
+from config import Config, group_digest_sources, press_monitor_sources
 from db import get_paused, set_paused
 from group_digest import run_group_digest
 from press_monitor import CATEGORIES, PressRunStats, run_press_monitor
@@ -93,7 +93,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         group_status = f"{group_chat}; источник Telegram отключён"
     else:
         group_status = f"{group_chat}; ежедневно в {getattr(cfg, 'telegram_group_digest_time', '21:00')} МСК"
-    press_channel = getattr(cfg, "telegram_press_channel", "")
+    press_channel = ", ".join(press_monitor_sources(cfg))
     press_status = "не настроен"
     if press_channel:
         if cfg.telegram_user_enabled:
@@ -260,7 +260,7 @@ async def cmd_press_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = context.bot_data["cfg"]
     if not _is_allowed(update, cfg):
         return
-    if not cfg.telegram_user_enabled or not getattr(cfg, "telegram_press_channel", ""):
+    if not cfg.telegram_user_enabled or not press_monitor_sources(cfg):
         await update.message.reply_text("Мониторинг запросов СМИ не настроен.")
         return
     try:

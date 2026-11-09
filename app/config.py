@@ -46,6 +46,7 @@ class Config:
     telegram_press_channel: str = ""
     telegram_press_poll_minutes: int = 60
     telegram_press_active_hours: str = "09:00-21:00"
+    telegram_press_channels: tuple[str, ...] = ()
 
 
 def group_digest_sources(cfg) -> tuple[str, ...]:
@@ -54,6 +55,17 @@ def group_digest_sources(cfg) -> tuple[str, ...]:
     if not sources:
         sources = (getattr(cfg, "telegram_group_digest_chat", ""),)
     return tuple(dict.fromkeys(source.strip() for source in sources if source.strip()))
+
+
+def press_monitor_sources(cfg) -> tuple[str, ...]:
+    sources = getattr(cfg, "telegram_press_channels", ())
+    if not sources:
+        sources = (getattr(cfg, "telegram_press_channel", ""),)
+    unique = {}
+    for source in sources:
+        if source.strip():
+            unique.setdefault(source.strip().casefold(), source.strip())
+    return tuple(unique.values())
 
 
 def load_config() -> Config:
@@ -86,6 +98,7 @@ def load_config() -> Config:
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", group_digest_time):
         raise RuntimeError("Invalid TELEGRAM_GROUP_DIGEST_TIME; use HH:MM in Moscow time")
     press_channel = _get_env("TELEGRAM_PRESS_CHANNEL", "").strip()
+    press_channels = tuple(item.strip() for item in _get_env("TELEGRAM_PRESS_CHANNELS", "").split(",") if item.strip())
     try:
         press_minutes = int(_get_env("TELEGRAM_PRESS_POLL_MINUTES", "60"))
         if press_minutes not in (5, 10, 15, 20, 30, 60):
@@ -120,7 +133,7 @@ def load_config() -> Config:
             raise RuntimeError("Missing required env var: TELEGRAM_USER_API_HASH when TELEGRAM_USER_ENABLED=1")
         if not telegram_user_session:
             raise RuntimeError("Missing required env var: TELEGRAM_USER_SESSION when TELEGRAM_USER_ENABLED=1")
-        if not any((telegram_source_channels, telegram_house_chats, group_digest_chat, group_digest_chats, press_channel)):
+        if not any((telegram_source_channels, telegram_house_chats, group_digest_chat, group_digest_chats, press_channel, press_channels)):
             raise RuntimeError(
                 "Configure TELEGRAM_SOURCE_CHANNELS or TELEGRAM_HOUSE_CHATS or TELEGRAM_GROUP_DIGEST_CHATS or TELEGRAM_PRESS_CHANNEL when TELEGRAM_USER_ENABLED=1"
             )
@@ -132,7 +145,7 @@ def load_config() -> Config:
             raise RuntimeError(
                 "Missing required env var for group digest: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)"
             )
-        if press_channel and not llm_api_key:
+        if (press_channel or press_channels) and not llm_api_key:
             raise RuntimeError("Missing required env var for press monitor: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)")
 
     return Config(
@@ -163,4 +176,5 @@ def load_config() -> Config:
         telegram_press_channel=press_channel,
         telegram_press_poll_minutes=press_minutes,
         telegram_press_active_hours=press_hours,
+        telegram_press_channels=press_channels,
     )

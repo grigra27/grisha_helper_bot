@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-from config import load_config, group_digest_sources
+from config import load_config, group_digest_sources, press_monitor_sources
 
 
 class ConfigTests(unittest.TestCase):
@@ -120,6 +120,14 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 with self.assertRaisesRegex(RuntimeError, key):
                     self.load(**{key: value})
+
+    def test_press_sources_preserve_legacy_and_deduplicate_the_plural_configuration(self):
+        old = self.user_source(TELEGRAM_PRESS_CHANNEL="@Pressfeed_queries", GROQ_API_KEY="test-key")
+        self.assertEqual(press_monitor_sources(old), ("@Pressfeed_queries",))
+        cfg = self.user_source(TELEGRAM_PRESS_CHANNEL="@old", TELEGRAM_PRESS_CHANNELS="@Pressfeed_queries,@partyzan499,@photodrive,@PHOTODRIVE", GROQ_API_KEY="test-key")
+        self.assertEqual(press_monitor_sources(cfg), ("@Pressfeed_queries", "@partyzan499", "@photodrive"))
+        with self.assertRaisesRegex(RuntimeError, "press monitor"):
+            self.user_source(TELEGRAM_PRESS_CHANNELS="@partyzan499")
 
 
 if __name__ == "__main__":
