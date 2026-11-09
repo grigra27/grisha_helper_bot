@@ -40,7 +40,7 @@ class TelegramBotCommandTests(unittest.TestCase):
             for handler in group
             for command in handler.commands
         }
-        expected = {"jobs_spb_now", "house_chats_now", "group_digest_now", "status", "pause", "resume", "help", "start"}
+        expected = {"jobs_spb_now", "house_chats_now", "group_digest_now", "press_now", "status", "pause", "resume", "help", "start"}
         self.assertEqual(commands, expected)
         self.assertEqual({command.command for command in telegram_bot.BOT_COMMANDS}, expected)
 
@@ -67,7 +67,7 @@ class TelegramBotOwnerTests(unittest.IsolatedAsyncioTestCase):
         update = make_update()
         await telegram_bot.cmd_help(update, SimpleNamespace(bot_data={"cfg": make_config()}))
         text = update.message.reply_text.await_args.args[0]
-        self.assertIn("вакансий и домовых чатов", text)
+        self.assertIn("сводки групп и домовых чатов", text)
         self.assertIn("/jobs_spb_now", text)
         self.assertIn("/house_chats_now", text)
         self.assertNotIn("/digest_now", text)
@@ -122,6 +122,7 @@ class TelegramBotOwnerTests(unittest.IsolatedAsyncioTestCase):
             telegram_bot.cmd_jobs_spb_now,
             telegram_bot.cmd_house_chats_now,
             telegram_bot.cmd_group_digest_now,
+            telegram_bot.cmd_press_now,
         )
         with (
             patch.object(telegram_bot, "get_paused") as get_paused,
@@ -286,6 +287,44 @@ class TelegramBotOwnerTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             self.assertEqual(await asyncio.gather(first, second), [1, 2])
         self.assertEqual(events, ["send1", "commit1", "send2", "commit2"])
+
+    async def test_multiple_groups_are_delivered_and_committed_independently(self):
+        cfg = make_config()
+        cfg.telegram_group_digest_chats = ("@vakifbank_tr", "@InteractiveBrokersRUS")
+        events = []
+        async def prepare(source_cfg):
+            source = source_cfg.telegram_group_digest_chat
+            return source, 1, lambda: events.append("commit " + source)
+        async def send(**kwargs):
+            events.append("send " + kwargs["text"])
+        app = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock(side_effect=send)))
+        with patch.object(telegram_bot, "run_group_digest", side_effect=prepare):
+            self.assertEqual(await telegram_bot.deliver_group_digest(app, cfg), 2)
+        self.assertEqual(events, ["send @vakifbank_tr", "commit @vakifbank_tr", "send @InteractiveBrokersRUS", "commit @InteractiveBrokersRUS"])
+
+    async def test_failed_group_does_not_prevent_the_other_group_delivery(self):
+        cfg = make_config()
+        cfg.telegram_group_digest_chats = ("@vakifbank_tr", "@InteractiveBrokersRUS")
+        commit = Mock()
+        app = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+        with patch.object(telegram_bot, "run_group_digest", new_callable=AsyncMock, side_effect=[RuntimeError("unavailable"), ("IB digest", 12, commit)]):
+            with self.assertLogs(telegram_bot.logger, level="ERROR"):
+                with self.assertRaisesRegex(RuntimeError, "@vakifbank_tr"):
+                    await telegram_bot.deliver_group_digest(app, cfg)
+        app.bot.send_message.assert_awaited_once()
+        self.assertEqual(app.bot.send_message.await_args.kwargs["text"], "IB digest")
+        commit.assert_called_once_with()
+
+    async def test_manual_press_check_only_replies_when_no_alert_was_sent(self):
+        cfg = make_config()
+        cfg.telegram_press_channel = "@Pressfeed_queries"
+        app = SimpleNamespace(bot_data={})
+        context = SimpleNamespace(bot_data={"cfg": cfg}, application=app)
+        for sent in (0, 2):
+            update = make_update()
+            with patch.object(telegram_bot, "deliver_press_requests", new_callable=AsyncMock, return_value=telegram_bot.PressRunStats(sent=sent)):
+                await telegram_bot.cmd_press_now(update, context)
+            self.assertEqual(update.message.reply_text.await_count, 1 if sent == 0 else 0)
 
 
 if __name__ == "__main__":

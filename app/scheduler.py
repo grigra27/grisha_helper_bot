@@ -31,3 +31,16 @@ def add_group_digest_job(scheduler: AsyncIOScheduler, job_func, delivery_time: s
         misfire_grace_time=3600,
     )
     logger.info("Scheduled group digest daily at %s Europe/Moscow", delivery_time)
+
+
+def add_press_monitor_job(scheduler: AsyncIOScheduler, job_func, poll_minutes: int = 15):
+    scheduler.add_job(
+        job_func,
+        trigger=CronTrigger(minute="0" if poll_minutes == 60 else f"*/{poll_minutes}", timezone="Europe/Moscow"),
+        id="press_monitor",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    logger.info("Scheduled press monitor every %s minutes Europe/Moscow", poll_minutes)

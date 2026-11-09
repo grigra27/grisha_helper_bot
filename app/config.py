@@ -42,6 +42,18 @@ class Config:
     log_level: str
     telegram_group_digest_chat: str = ""
     telegram_group_digest_time: str = "21:00"
+    telegram_group_digest_chats: tuple[str, ...] = ()
+    telegram_press_channel: str = ""
+    telegram_press_poll_minutes: int = 15
+    telegram_press_active_hours: str = "09:00-21:00"
+
+
+def group_digest_sources(cfg) -> tuple[str, ...]:
+    """Plural configuration takes precedence; keep the original source compatible."""
+    sources = getattr(cfg, "telegram_group_digest_chats", ())
+    if not sources:
+        sources = (getattr(cfg, "telegram_group_digest_chat", ""),)
+    return tuple(dict.fromkeys(source.strip() for source in sources if source.strip()))
 
 
 def load_config() -> Config:
@@ -67,9 +79,23 @@ def load_config() -> Config:
     house_chats_raw = _get_env("TELEGRAM_HOUSE_CHATS", "")
     telegram_house_chats: list[tuple[str, str]] = []
     group_digest_chat = _get_env("TELEGRAM_GROUP_DIGEST_CHAT", "").strip()
+    group_digest_chats = tuple(dict.fromkeys(
+        item.strip() for item in _get_env("TELEGRAM_GROUP_DIGEST_CHATS", "").split(",") if item.strip()
+    ))
     group_digest_time = _get_env("TELEGRAM_GROUP_DIGEST_TIME", "21:00").strip()
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", group_digest_time):
         raise RuntimeError("Invalid TELEGRAM_GROUP_DIGEST_TIME; use HH:MM in Moscow time")
+    press_channel = _get_env("TELEGRAM_PRESS_CHANNEL", "").strip()
+    try:
+        press_minutes = int(_get_env("TELEGRAM_PRESS_POLL_MINUTES", "15"))
+        if press_minutes not in (5, 10, 15, 20, 30, 60):
+            raise ValueError
+    except ValueError:
+        raise RuntimeError("Invalid TELEGRAM_PRESS_POLL_MINUTES; use 5, 10, 15, 20, 30 or 60") from None
+    press_hours = _get_env("TELEGRAM_PRESS_ACTIVE_HOURS", "09:00-21:00").strip()
+    clock = r"(?:[01]\d|2[0-3]):[0-5]\d"
+    if not re.fullmatch(clock + "-" + clock, press_hours):
+        raise RuntimeError("Invalid TELEGRAM_PRESS_ACTIVE_HOURS; use HH:MM-HH:MM in Moscow time")
     for item in house_chats_raw.split(";"):
         part = item.strip()
         if not part:
@@ -94,18 +120,20 @@ def load_config() -> Config:
             raise RuntimeError("Missing required env var: TELEGRAM_USER_API_HASH when TELEGRAM_USER_ENABLED=1")
         if not telegram_user_session:
             raise RuntimeError("Missing required env var: TELEGRAM_USER_SESSION when TELEGRAM_USER_ENABLED=1")
-        if not telegram_source_channels and not telegram_house_chats and not group_digest_chat:
+        if not any((telegram_source_channels, telegram_house_chats, group_digest_chat, group_digest_chats, press_channel)):
             raise RuntimeError(
-                "Configure TELEGRAM_SOURCE_CHANNELS or TELEGRAM_HOUSE_CHATS or TELEGRAM_GROUP_DIGEST_CHAT when TELEGRAM_USER_ENABLED=1"
+                "Configure TELEGRAM_SOURCE_CHANNELS or TELEGRAM_HOUSE_CHATS or TELEGRAM_GROUP_DIGEST_CHATS or TELEGRAM_PRESS_CHANNEL when TELEGRAM_USER_ENABLED=1"
             )
         if telegram_house_chats and not llm_api_key:
             raise RuntimeError(
                 "Missing required env var for house chats: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)"
             )
-        if group_digest_chat and not llm_api_key:
+        if (group_digest_chat or group_digest_chats) and not llm_api_key:
             raise RuntimeError(
                 "Missing required env var for group digest: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)"
             )
+        if press_channel and not llm_api_key:
+            raise RuntimeError("Missing required env var for press monitor: LLM_API_KEY (or GROQ_API_KEY/OPENAI_API_KEY)")
 
     return Config(
         telegram_bot_token=_get_env("TELEGRAM_BOT_TOKEN", required=True),
@@ -131,4 +159,8 @@ def load_config() -> Config:
         log_level=_get_env("LOG_LEVEL", "INFO"),
         telegram_group_digest_chat=group_digest_chat,
         telegram_group_digest_time=group_digest_time,
+        telegram_group_digest_chats=group_digest_chats,
+        telegram_press_channel=press_channel,
+        telegram_press_poll_minutes=press_minutes,
+        telegram_press_active_hours=press_hours,
     )

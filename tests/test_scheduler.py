@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 import main
-from scheduler import add_group_digest_job, add_jobs_digest_job, make_scheduler
+from scheduler import add_group_digest_job, add_jobs_digest_job, add_press_monitor_job, make_scheduler
 from telegram_jobs import ChannelRunStats
 
 
@@ -45,6 +45,17 @@ class SchedulerTests(unittest.TestCase):
         next_run = group.trigger.get_next_fire_time(None, datetime(2026, 11, 7, 17, tzinfo=timezone.utc))
         self.assertEqual(next_run.astimezone(ZoneInfo("Europe/Moscow")), datetime(2026, 11, 7, 21, tzinfo=ZoneInfo("Europe/Moscow")))
         self.assertEqual(next_run.astimezone(timezone.utc).hour, 18)
+
+    def test_press_polling_uses_moscow_quarter_hours_with_overlap_protection(self):
+        async def job():
+            pass
+        scheduler = make_scheduler("UTC")
+        add_press_monitor_job(scheduler, job, 15)
+        entry = scheduler.get_job("press_monitor")
+        self.assertEqual(entry.max_instances, 1)
+        self.assertTrue(entry.coalesce)
+        upcoming = entry.trigger.get_next_fire_time(None, datetime(2026, 11, 9, 10, 2, tzinfo=timezone.utc))
+        self.assertEqual(upcoming.astimezone(ZoneInfo("Europe/Moscow")).strftime("%H:%M"), "13:15")
 
 
 class MainGroupSchedulingTests(unittest.IsolatedAsyncioTestCase):
@@ -166,6 +177,43 @@ class MainVacancyDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.send.await_count, 2)
         self.assertIn("Вакансия аналитика", self.send.await_args_list[0].args[2])
         self.assertTrue(self.send.await_args_list[1].args[2].startswith("Ошибка авто-сбора вакансий СПб:"))
+
+
+class MainPressSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_press_checks_respect_window_and_do_not_send_zero_results(self):
+        cfg = SimpleNamespace(log_level="INFO", tz="Europe/Moscow", telegram_user_enabled=True,
+            telegram_source_channels=[], telegram_group_digest_chat="", telegram_group_digest_time="21:00",
+            telegram_press_channel="@Pressfeed_queries", telegram_press_poll_minutes=15)
+        app = SimpleNamespace(initialize=AsyncMock(), start=AsyncMock(), stop=AsyncMock(), shutdown=AsyncMock(),
+            updater=SimpleNamespace(start_polling=AsyncMock(), stop=AsyncMock()))
+        with (
+            patch.object(main, "load_config", return_value=cfg), patch.object(main, "setup_logging"),
+            patch.object(main, "init_db"), patch.object(main, "build_app", return_value=app),
+            patch.object(main, "make_scheduler", return_value=SimpleNamespace(start=Mock())),
+            patch.object(main, "register_bot_commands", new_callable=AsyncMock),
+            patch.object(main, "add_press_monitor_job") as scheduled,
+            patch.object(main, "monitoring_window_open", return_value=False) as window,
+            patch.object(main, "deliver_press_requests", new_callable=AsyncMock) as deliver,
+            patch.object(main, "send_to_owner", new_callable=AsyncMock) as send,
+            patch.object(main, "asyncio", SimpleNamespace(sleep=AsyncMock(side_effect=asyncio.CancelledError))),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await main.main_async()
+            scheduled.assert_called_once()
+            self.assertEqual(scheduled.call_args.args[2], 15)
+            job = scheduled.call_args.args[1]
+            await job()
+            deliver.assert_not_awaited()
+            window.return_value = True
+            await job()
+            deliver.assert_awaited_once_with(app, cfg)
+            send.assert_not_awaited()
+            deliver.side_effect = RuntimeError("private-key-marker")
+            with self.assertLogs(main.__name__, level="ERROR"):
+                await job()
+                await job()
+            send.assert_awaited_once()
+            self.assertNotIn("private-key-marker", send.await_args.args[2])
 
 
 if __name__ == "__main__":

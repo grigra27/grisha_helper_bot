@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-from config import load_config
+from config import load_config, group_digest_sources
 
 
 class ConfigTests(unittest.TestCase):
@@ -102,6 +102,24 @@ class ConfigTests(unittest.TestCase):
         for value in ("00:00", "23:59"):
             with self.subTest(value=value):
                 self.assertEqual(self.load(TELEGRAM_GROUP_DIGEST_TIME=value).telegram_group_digest_time, value)
+
+    def test_multiple_groups_override_legacy_source_without_duplicates(self):
+        cfg = self.user_source(TELEGRAM_GROUP_DIGEST_CHAT="@legacy", TELEGRAM_GROUP_DIGEST_CHATS="@vakifbank_tr, @InteractiveBrokersRUS,@vakifbank_tr", GROQ_API_KEY="test-key")
+        self.assertEqual(group_digest_sources(cfg), ("@vakifbank_tr", "@InteractiveBrokersRUS"))
+        legacy = self.user_source(TELEGRAM_GROUP_DIGEST_CHAT="@vakifbank_tr", GROQ_API_KEY="test-key")
+        self.assertEqual(group_digest_sources(legacy), ("@vakifbank_tr",))
+
+    def test_press_only_source_requires_model_key_and_accepts_window(self):
+        with self.assertRaisesRegex(RuntimeError, "press monitor: LLM_API_KEY"):
+            self.user_source(TELEGRAM_PRESS_CHANNEL="@Pressfeed_queries")
+        cfg = self.user_source(TELEGRAM_PRESS_CHANNEL="@Pressfeed_queries", GROQ_API_KEY="test-key")
+        self.assertEqual(cfg.telegram_press_poll_minutes, 15)
+        self.assertEqual(cfg.telegram_press_active_hours, "09:00-21:00")
+        self.assertEqual(group_digest_sources(cfg), ())
+        for key, value in [("TELEGRAM_PRESS_POLL_MINUTES", "0"), ("TELEGRAM_PRESS_POLL_MINUTES", "7"), ("TELEGRAM_PRESS_ACTIVE_HOURS", "9-21"), ("TELEGRAM_PRESS_ACTIVE_HOURS", "09:00-24:00")]:
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(RuntimeError, key):
+                    self.load(**{key: value})
 
 
 if __name__ == "__main__":

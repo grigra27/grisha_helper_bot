@@ -2,12 +2,14 @@ import asyncio
 import logging
 import os
 import re
+import time
 
-from config import load_config, Config
+from config import load_config, Config, group_digest_sources
 from db import init_db, get_paused
-from telegram_bot import build_app, send_to_owner, register_bot_commands, deliver_group_digest
+from telegram_bot import build_app, send_to_owner, register_bot_commands, deliver_group_digest, deliver_press_requests
+from press_monitor import monitoring_window_open
 from telegram_jobs import format_channel_stats, run_spb_jobs_digest
-from scheduler import make_scheduler, add_jobs_digest_job, add_group_digest_job
+from scheduler import make_scheduler, add_jobs_digest_job, add_group_digest_job, add_press_monitor_job
 
 
 class RedactTelegramBotTokenFilter(logging.Filter):
@@ -88,11 +90,30 @@ async def main_async():
             logging.getLogger(__name__).exception("Scheduled group digest failed")
             await send_to_owner(
                 app, cfg,
-                "Не удалось подготовить или отправить сводку группы. Повторим при следующем запуске.",
+                "Не удалось отправить одну из сводок групп. Неотправленные обсуждения обработаем при следующем запуске.",
             )
 
-    if cfg.telegram_user_enabled and cfg.telegram_group_digest_chat:
+    if cfg.telegram_user_enabled and group_digest_sources(cfg):
         add_group_digest_job(scheduler, scheduled_group_digest_job, cfg.telegram_group_digest_time)
+
+    last_press_error = None
+
+    async def scheduled_press_monitor_job():
+        nonlocal last_press_error
+        if not monitoring_window_open(cfg):
+            return
+        try:
+            await deliver_press_requests(app, cfg)
+            last_press_error = None
+        except Exception:
+            logging.getLogger(__name__).exception("Scheduled press monitor failed")
+            current = time.monotonic()
+            if last_press_error is None or current - last_press_error >= 3600:
+                await send_to_owner(app, cfg, "Не удалось проверить запросы СМИ. Повторим при следующей проверке.")
+                last_press_error = current
+
+    if cfg.telegram_user_enabled and getattr(cfg, "telegram_press_channel", ""):
+        add_press_monitor_job(scheduler, scheduled_press_monitor_job, cfg.telegram_press_poll_minutes)
 
     scheduler.start()
 

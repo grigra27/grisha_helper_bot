@@ -173,6 +173,40 @@ class GroupDigestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.kv_get(CURSOR), "270")
         self.assertIsNotNone(db.kv_get(DELIVERED))
 
+    async def test_another_group_uses_its_own_name_links_and_checkpoint(self):
+        other_id = 1291226157
+        db.kv_set(CURSOR, "152040")
+        self.cfg.telegram_group_digest_chat = "@InteractiveBrokersRUS"
+        self.telegram.get_entity = AsyncMock(return_value=SimpleNamespace(
+            id=other_id, title="Неофициальный чат Interactive Brokers", username="InteractiveBrokersRUS",
+        ))
+        self.telegram.messages = [message(7, "Участники обсуждали отчёт брокера и комиссии")]
+        text, count, commit = await group_digest.run_group_digest(self.cfg)
+        self.assertEqual(count, 1)
+        self.assertIn("Interactive Brokers", text)
+        self.assertIn("https://t.me/InteractiveBrokersRUS/7", text)
+        self.assertNotIn("VakifBank", text)
+        commit()
+        self.assertEqual(db.kv_get(CURSOR), "152040")
+        self.assertEqual(db.kv_get(f"tg_group_last_id:{other_id}"), "7")
+
+    async def test_malformed_first_model_reply_is_retried_without_delivering_bad_sources(self):
+        self.telegram.messages = [message(7, "Обсуждение комиссии брокера")]
+        create = self.llm.create
+        attempts = []
+        def respond(**kwargs):
+            self.llm.source_override = [999999] if not attempts else None
+            attempts.append(True)
+            return create(**kwargs)
+        self.llm.chat.completions.create = respond
+        text, count, commit = await group_digest.run_group_digest(self.cfg)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(count, 1)
+        self.assertNotIn("999999", text)
+        self.assertIsNone(db.kv_get(CURSOR))
+        commit()
+        self.assertEqual(db.kv_get(CURSOR), "7")
+
     async def test_first_run_only_reads_the_last_24_hours(self):
         self.telegram.messages = [
             message(1, "Слишком старое сообщение", age=timedelta(hours=25)),
