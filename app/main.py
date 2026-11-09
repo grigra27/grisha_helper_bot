@@ -69,13 +69,11 @@ async def main_async():
             return
         try:
             text, matched_posts, channel_stats, commit = await run_spb_jobs_digest(cfg)
+            # Empty digests already include channel statistics.
+            if matched_posts:
+                text += f"\n\nПодходящих постов: {matched_posts}.\n{format_channel_stats(channel_stats)}"
             await send_to_owner(app, cfg, text)
             commit()
-            await send_to_owner(
-                app,
-                cfg,
-                f"Готово. Подходящих постов: {matched_posts}.\n{format_channel_stats(channel_stats)}",
-            )
         except Exception as e:
             logging.getLogger(__name__).exception("Scheduled SPB jobs digest failed")
             await send_to_owner(app, cfg, f"Ошибка авто-сбора вакансий СПб: {e}")
