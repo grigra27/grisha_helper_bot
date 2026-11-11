@@ -1,8 +1,18 @@
-name: Deploy to VPS
+name: Deploy grisha_helper_bot
 
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      build_image:
+        description: "Build the application image (disable only to reuse a verified server image)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: grisha_helper_bot-production
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -31,19 +41,27 @@ jobs:
           script: |
             set -e
 
-            cd ${{ secrets.VPS_PATH }}
+            test "${{ secrets.VPS_PATH }}" = /opt/grisha_helper_bot
+            cd "${{ secrets.VPS_PATH }}"
 
             # Clone if repo not present (SSH URL works for private repos)
             if [ ! -d .git ]; then
-              git clone --depth 1 git@github.com:grigra27/molt-mail-digest.git .
+              git clone --depth 1 git@github.com:grigra27/grisha_helper_bot.git .
             fi
 
             # Update to latest main
-            git fetch --all
-            git reset --hard origin/main
+            git fetch origin main
+            git merge --ff-only origin/main
 
             # .env must exist on the server
             test -f .env || (echo ".env not found on server" && exit 1)
 
-            docker compose up -d --build
+            docker compose config --quiet
+            docker volume inspect grisha_helper_bot_appdata >/dev/null
+            if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.build_image }}" = false ]; then
+              docker image inspect grisha_helper_bot:latest >/dev/null
+              docker compose up -d --no-build
+            else
+              docker compose up -d --build
+            fi
             docker compose ps

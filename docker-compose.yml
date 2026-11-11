@@ -1,5 +1,9 @@
+name: grisha_helper_bot
+
 services:
   app:
+    image: grisha_helper_bot:latest
+    container_name: grisha_helper_bot
     build: ./app
     env_file: .env
     volumes:
@@ -8,3 +12,5 @@ services:
 
 volumes:
   appdata:
+    external: true
+    name: grisha_helper_bot_appdata
