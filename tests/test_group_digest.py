@@ -318,6 +318,28 @@ class GroupDigestTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("https://t.me/vakifbank_tr/11", text)
         self.assertNotIn("https://t.me/vakifbank_tr/999999", text)
 
+    async def test_extra_valid_sources_are_deduplicated_and_limited_without_retry(self):
+        for stage in ("map", "reduce"):
+            with self.subTest(stage=stage):
+                self.llm.source_override = [11, 11, 12, 13, 14]
+                items = ([{"id": i, "text": "Обсуждение"} for i in range(11, 15)]
+                         if stage == "map" else [{"source_ids": [11, 12, 13, 14]}])
+                calls_before = len(self.llm.calls)
+                topics = await group_digest._complete(self.llm, "test-model", stage, items)
+                self.assertEqual(topics[0]["source_ids"], [11, 12, 13])
+                self.assertEqual(len(self.llm.calls), calls_before + 1)
+
+    async def test_invalid_extra_source_still_rejects_digest_without_advancing_cursor(self):
+        db.kv_set(CURSOR, "10")
+        self.telegram.messages = [message(i, "Новое обсуждение") for i in range(11, 15)]
+        for invalid in (999999, "14", True):
+            with self.subTest(invalid=invalid):
+                self.llm.source_override = [11, 12, 13, invalid]
+                with self.assertRaises(group_digest.GroupDigestError):
+                    await group_digest.run_group_digest(self.cfg)
+                self.assertEqual(db.kv_get(CURSOR), "10")
+                self.assertIsNone(db.kv_get(DELIVERED))
+
     async def test_model_supplied_urls_are_removed_from_the_summary(self):
         db.kv_set(CURSOR, "10")
         self.telegram.messages = [message(11, "Обсуждение комиссии")]

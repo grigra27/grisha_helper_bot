@@ -262,7 +262,7 @@ async def _complete(client, model: str, stage: str, items: list[dict], repair: i
             if (
                 not isinstance(title, str) or not 1 <= len(title.strip()) <= 160
                 or not isinstance(summary, str) or not 1 <= len(summary.strip()) <= 900
-                or not isinstance(ids, list) or not 1 <= len(ids) <= 3
+                or not isinstance(ids, list) or not ids
                 or any(type(source) is not int or source not in allowed for source in ids)
             ):
                 raise ValueError
@@ -271,7 +271,9 @@ async def _complete(client, model: str, stage: str, items: list[dict], repair: i
                 raise ValueError
             checked.append({
                 "title": title, "summary": summary,
-                "source_ids": list(dict.fromkeys(ids)),
+                # Validate every ID before limiting the displayed references:
+                # extra real sources must not invalidate an otherwise valid topic.
+                "source_ids": list(dict.fromkeys(ids))[:3],
             })
         return checked
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
